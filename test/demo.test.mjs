@@ -1,0 +1,12 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import {config} from '../src/config.mjs';import {Engine,formatReply} from '../src/engine.mjs';import {parseCommand} from '../src/commands.mjs';import {openStore,enqueue} from '../src/store.mjs';import {DemoBudget} from '../src/budget.mjs';
+test('market discovery and user-owned history/stats work through commands',async()=>{
+ const db=openStore(':memory:'),cfg=config({}),engine=new Engine(db,{get:async symbol=>({symbol,price:60000,timestamp:Date.now()})},cfg);let n=0;
+ async function send(text,user='alice'){const id=String(++n);enqueue(db,{postId:id,userId:user,text:'@StrikeAGentt '+text});return engine.process(db.prepare('SELECT * FROM events WHERE post_id=?').get(id))}
+ assert.deepEqual(parseCommand('@StrikeAGentt price BTC','StrikeAGentt'),{type:'price',symbol:'BTC-USD'});
+ assert.match(await send('markets'),/BTC, ETH, SOL, ADA/);assert.match(await send('price BTC'),/60,000/);
+ await send('paper long BTC $100 2x');await send('close P1');assert.match(await send('history'),/P1 long BTC net/);assert.match(await send('stats'),/1 closed/);assert.match(await send('history','bob'),/No closed positions/);db.close();
+});
+test('long replies retain the complete trading link and paper label',()=>{const reply=formatReply('PAPER '+ 'x'.repeat(400));assert.ok(Array.from(reply).length<=275);assert.ok(reply.startsWith('PAPER'));assert.ok(reply.endsWith('https://app.strikefinance.org'))});
+test('uncertain sends consume the demo attempt cap and pause delivery',async()=>{const db=openStore(':memory:');enqueue(db,{postId:'1',userId:'a',text:'help'});db.prepare('INSERT INTO replies(post_id,text,status) VALUES(?,?,?)').run('1','receipt','uncertain');let deletes=0;const guard=new DemoBudget(db,{X_MAX_REPLY_ATTEMPTS:'1',X_MENTION_SUBSCRIPTION_ID:'sub',X_APP_BEARER_TOKEN:'fixture'},async(url,opts)=>{assert.equal(opts.method,'DELETE');deletes++;return {ok:true}});assert.equal(await guard.allow(),false);assert.equal(await guard.allow(),false);assert.equal(deletes,1);db.close()});
+test('budget baseline persists across restarts and preserves reserve',async()=>{const db=openStore(':memory:');const env={X_DEMO_BUDGET_USD:'4',X_APP_BEARER_TOKEN:'fixture'};let balance=5;const fetcher=async()=>({ok:true,json:async()=>({data:{total_balance:balance}})});assert.equal(await new DemoBudget(db,env,fetcher).allow(),true);balance=1.3;assert.equal(await new DemoBudget(db,env,fetcher).allow(),false);db.close()});
